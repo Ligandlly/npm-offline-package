@@ -1,0 +1,132 @@
+name: NPM Offline Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'npm 包名，例如 lodash 或 lodash@4.17.21'
+        required: true
+        type: string
+      node_version:
+        description: 'Node.js 版本'
+        required: false
+        default: '22.22.1'
+        type: string
+      npm_version:
+        description: 'npm 版本'
+        required: false
+        default: '9.2.0'
+        type: string
+
+jobs:
+  build-offline-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install specified npm
+        env:
+          NPM_VERSION: ${{ inputs.npm_version }}
+        run: |
+          npm install -g "npm@$NPM_VERSION"
+          node -v
+          npm -v
+
+      - name: Generate safe artifact name
+        id: meta
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+        run: |
+          SAFE_NAME=$(echo "$PACKAGE_NAME" | sed 's/[\/@:]/-/g' | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+          if [ -z "$SAFE_NAME" ]; then
+            SAFE_NAME="package"
+          fi
+
+          echo "safe_name=$SAFE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build offline package
+        env:
+          PKG: ${{ inputs.package_name }}
+          SAFE_NAME: ${{ steps.meta.outputs.safe_name }}
+          NODE_VER: ${{ inputs.node_version }}
+          NPM_VER: ${{ inputs.npm_version }}
+        run: |
+          set -euo pipefail
+
+          DIR="offline-$SAFE_NAME"
+          mkdir -p "$DIR/tarballs"
+          cd "$DIR"
+
+          npm init -y
+          npm pkg set name=offline-package private=true
+
+          # 使用本地 npm cache 安装依赖，便于离线恢复
+          npm install "$PKG" --cache ./npm-cache --ignore-scripts --no-audit --no-fund
+
+          # 同时保留主包本身的 tgz
+          npm pack "$PKG" --pack-destination ./tarballs || true
+
+          # 清理缓存日志，减小体积
+          npm cache verify --cache ./npm-cache || true
+          rm -rf ./npm-cache/_logs || true
+
+          cat > install.sh <<'SH'
+          #!/usr/bin/env bash
+          set -e
+
+          echo "Restoring dependencies from offline npm cache..."
+
+          npm ci --offline --cache ./npm-cache --ignore-scripts --no-audit --no-fund || \
+          npm install --offline --cache ./npm-cache --ignore-scripts --no-audit --no-fund
+
+          echo "Done. Dependencies are in ./node_modules"
+          SH
+
+          chmod +x install.sh
+
+          cat > install.bat <<'BAT'
+          @echo off
+          echo Restoring dependencies from offline npm cache...
+
+          call npm ci --offline --cache ./npm-cache --ignore-scripts --no-audit --no-fund
+
+          if errorlevel 1 (
+            call npm install --offline --cache ./npm-cache --ignore-scripts --no-audit --no-fund
+          )
+
+          echo Done. Dependencies are in .\node_modules
+          BAT
+
+          cat > README.md <<MD
+          # Offline bundle for $PKG
+
+          Generated with Node $NODE_VER and npm $NPM_VER.
+
+          Contents:
+          - package.json / package-lock.json
+          - node_modules
+          - npm-cache
+          - tarballs
+
+          Restore dependencies:
+          - Linux/macOS: ./install.sh
+          - Windows: install.bat
+
+          The main package tarball is in ./tarballs.
+          MD
+
+          cd ..
+          tar -czf "$DIR.tar.gz" "$DIR"
+
+      - name: Upload offline bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-${{ steps.meta.outputs.safe_name }}
+          path: offline-${{ steps.meta.outputs.safe_name }}.tar.gz
+          retention-days: 30
+          if-no-files-found: error
