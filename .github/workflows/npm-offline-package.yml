@@ -89,6 +89,33 @@ jobs:
 
           chmod +x install.sh
 
+          cat > install_global.sh <<'SH'
+          #!/usr/bin/env bash
+          set -e
+
+          echo "Installing globally from offline bundle..."
+
+          if [ "$(id -u)" -ne 0 ]; then
+            SUDO="sudo"
+          else
+            SUDO=""
+          fi
+
+          TARBALL=$(ls ./tarballs/*.tgz 2>/dev/null | head -n 1)
+          if [ -n "$TARBALL" ]; then
+            echo "Found tarball: $TARBALL"
+            $SUDO npm install -g "$TARBALL"
+          else
+            echo "No tarball found. Attempting to install from cache..."
+            PKG=$(node -p "const p=require('./package.json'); Object.keys(p.dependencies||{})[0]")
+            $SUDO npm install -g "$PKG" --offline --cache ./npm-cache
+          fi
+
+          echo "Done. Installed globally."
+          SH
+
+          chmod +x install_global.sh
+
           cat > install.bat <<'BAT'
           @echo off
           echo Restoring dependencies from offline npm cache...
@@ -102,6 +129,30 @@ jobs:
           echo Done. Dependencies are in .\node_modules
           BAT
 
+          cat > install_global.bat <<'BAT'
+          @echo off
+          setlocal enabledelayedexpansion
+
+          echo Installing globally from offline bundle...
+
+          set "TARBALL="
+          for %%f in (.\tarballs\*.tgz) do (
+            set "TARBALL=%%f"
+          )
+
+          if defined TARBALL (
+            echo Found tarball: !TARBALL!
+            call npm install -g "!TARBALL!"
+          ) else (
+            echo No tarball found. Attempting to install from cache...
+            for /f "delims=" %%i in ('node -p "const p=require('./package.json'); Object.keys(p.dependencies^|^|{})[0]"') do set "PKG=%%i"
+            call npm install -g "!PKG!" --offline --cache ./npm-cache
+          )
+
+          echo Done. Installed globally.
+          endlocal
+          BAT
+
           cat > README.md <<MD
           # Offline bundle for $PKG
 
@@ -113,9 +164,13 @@ jobs:
           - npm-cache
           - tarballs
 
-          Restore dependencies:
+          Restore dependencies locally:
           - Linux/macOS: ./install.sh
           - Windows: install.bat
+
+          Install globally:
+          - Linux/macOS: ./install_global.sh (uses sudo if needed)
+          - Windows: install_global.bat
 
           The main package tarball is in ./tarballs.
           MD
